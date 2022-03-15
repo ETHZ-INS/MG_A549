@@ -1,0 +1,59 @@
+---
+title: "Preparing GR peaks & targets"
+author: "Pierre-Luc Germain"
+date: "3/1/2022"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(epiwraps)
+})
+download.file("https://www.encodeproject.org/files/ENCFF567KLR/@@download/ENCFF567KLR.bed.gz", "extdata/ENCFF567KLR_GR_12h.bed.gz")
+download.file("https://www.encodeproject.org/files/ENCFF443TPX/@@download/ENCFF443TPX.bed.gz", "extdata/ENCFF443TPX_GR_30min.bed.gz")
+download.file("https://www.encodeproject.org/files/ENCFF829HRZ/@@download/ENCFF829HRZ.tsv",
+              "extdata/ENCFF829HRZ_HiCinteractions_4h.tsv")
+gr30m <- rtracklayer::import("extdata/ENCFF443TPX_GR_30min.bed.gz", format="NarrowPeak")
+gr12h <- rtracklayer::import("extdata/ENCFF567KLR_GR_12h.bed.gz", format="NarrowPeak")
+hic <- read.delim("extdata/ENCFF829HRZ_HiCinteractions_4h.tsv")
+seqlevelsStyle(gr30m) <- seqlevelsStyle(gr12h) <- "ensembl"
+ah <- AnnotationHub()
+ensdb <- ah[["AH89426"]]
+proms <- transcripts(ensdb, columns=c("gene_name"))
+o1 <- as.data.frame(findOverlaps(GRanges(gsub("chr","",hic$chr1), IRanges(hic$x1,hic$x2)), proms))
+o1$gene <- proms$gene_name[o1$subjectHits]
+o1 <- o1[!duplicated(o1[,c(1,3)]),]
+o1b <- splitAsList(o1$gene, o1$queryHits)
+o1 <- as.data.frame(findOverlaps(GRanges(gsub("chr","",hic$chr2), IRanges(hic$y1,hic$y2)), proms))
+o1$gene <- proms$gene_name[o1$subjectHits]
+o1 <- o1[!duplicated(o1[,c(1,3)]),]
+o2b <- splitAsList(o1$gene, o1$queryHits)
+hic2 <- c(
+  GRanges(gsub("chr","",hic$chr1), IRanges(hic$x1,hic$x2))[as.numeric(names(o2b))],
+  GRanges(gsub("chr","",hic$chr2), IRanges(hic$y1,hic$y2))[as.numeric(names(o1b))]
+)
+hic2$gene <- c(o2b,o1b)
+saveRDS(hic2, "extdata/HiC_targets.GR.rds")
+gr30m <- annotateRegions(gr30m, ensdb, c(5000,2500,500))
+o <- findOverlaps(gr30m, hic2)
+gr30m$distal_interaction <- NA
+gr30m$distal_interaction[from(o)] <- paste(hic2$gene[to(o)], collapse = ", ")
+gr12h <- annotateRegions(gr12h, ensdb, c(5000,2500,500))
+o <- findOverlaps(gr12h, hic2)
+gr12h$distal_interaction <- NA
+gr12h$distal_interaction[from(o)] <- paste(hic2$gene[to(o)], collapse = ", ")
+
+gl <- list(
+  dex30m_500bp=unique(gr30m$nearestTSS.gene_name[abs(gr30m$distance2nearestTSS)<500]),
+  dex30m_2500bp=unique(gr30m$nearestTSS.gene_name[abs(gr30m$distance2nearestTSS)<2500]),
+  dex30m_5kb=unique(gr30m$nearestTSS.gene_name[grep("proximal|TSS",gr30m$class)]),
+  dex30m_distal=unique(unlist(strsplit(gr30m$distal_interaction[!is.na(gr30m$distal_interaction)],", "))),
+  dex12h_500bp=unique(gr12h$nearestTSS.gene_name[abs(gr12h$distance2nearestTSS)<500]),
+  dex12h_2500bp=unique(gr12h$nearestTSS.gene_name[abs(gr12h$distance2nearestTSS)<2500]),
+  dex12h_5kb=unique(gr12h$nearestTSS.gene_name[grep("proximal|TSS",gr12h$class)]),
+  dex12h_distal=unique(unlist(strsplit(gr12h$distal_interaction[!is.na(gr12h$distal_interaction)],", ")))
+)
+gl <- lapply(gl, FUN=function(x) x[!is.na(x) & x!="NA"])
+saveRDS(gl, "extdata/GR.targets.rds")
+```

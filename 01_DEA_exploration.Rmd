@@ -1,0 +1,74 @@
+---
+title: "DEA and exploration"
+author: "Pierre-Luc Germain"
+date: "3/1/2022"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(SEtools)
+  library(edgeR)
+  library(ggplot2)
+})
+```
+
+
+
+```{r, fig.width=8, fig.height=6}
+se <- readRDS("salmon/geneLevel.SE.rds")
+dds <- calcNormFactors(DGEList(assay(se)))
+assays(se)$logcpm <- log1p(cpm(dds))
+dds <- dds[filterByExpr(dds,model.matrix(~se$condition),min.count=20),]
+se <- se[row.names(dds),]
+tmp <- assays(se)$TPM[order(-rowSums(assays(se)$TPM))[1:2000],]
+rd <- BiocSingular::runExactSVD(tmp,center=FALSE,scale=FALSE)$v
+colnames(rd) <- paste0("C",seq_len(ncol(rd)))
+d <- cbind(as.data.frame(colData(se)), rd[,1:5])
+ggplot(d, aes(C1, C2, shape=batch, colour=condition)) + geom_point()
+```
+
+
+```{r}
+se <- svacor(se, ~condition, n.sv=2)
+se$condition <- relevel(factor(se$condition), "18h untreated")
+se$condition2 <- se$condition
+levels(se$condition2) <- gsub("^18h DMSO$|18h untreated","control",levels(se$condition2))
+mm <- model.matrix(~SV1+SV2+condition2, data=as.data.frame(colData(se)))
+dds <- estimateDisp(dds,mm)
+conds <- grep("condition",colnames(mm),value=TRUE)
+names(conds) <- gsub("condition","",conds)
+fit <- glmFit(dds,mm)
+res <- lapply(conds, FUN=function(x){
+  as.data.frame(topTags(glmLRT(fit,x), Inf))
+})
+for(f in names(res)){
+  rowData(se)[[paste0("DEA.",f)]] <- 
+    plgINS::dround(res[[f]][row.names(se),c(1,2,4,5)], 2, TRUE)
+}
+topDegs <- unique(unlist(lapply(res, FUN=function(x) head(row.names(x),15))))
+levels(se$condition) <- gsub("> ",">\n", levels(se$condition))
+se$condition <- factor(se$condition, 
+                       unique(c("18h untreated","18h DMSO",levels(se$condition))))
+se <- log2FC(se, "logcpm", se$condition2=="control")
+```
+
+
+```{r, fig.width=8, fig.height=8}
+sechm(se, topDegs, assay="logcpm", do.scale=TRUE, gaps_at="condition", 
+      anno_columns="batch", row_title="Union of top DEGs", show_rownames=TRUE,
+      row_names_gp=gpar(fontsize=9), column_title_gp=gpar(fontsize=10),
+      column_title_rot=90)
+```
+
+```{r, fig.width=8, fig.height=8}
+sechm(se, topDegs, assay="log2FC", gaps_at="condition", 
+      anno_columns="batch", row_title="Union of top DEGs", show_rownames=TRUE,
+      row_names_gp=gpar(fontsize=9), column_title_gp=gpar(fontsize=10),
+      column_title_rot=90)
+```
+```{r}
+
+```
+
