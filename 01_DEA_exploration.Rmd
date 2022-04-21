@@ -1,20 +1,28 @@
 ---
-title: "DEA and exploration"
+title: "MG A549 experiments - DEA and exploration"
 author: "Pierre-Luc Germain"
 date: "3/1/2022"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
 ---
 
 ```{r}
 suppressPackageStartupMessages({
   library(SummarizedExperiment)
   library(SEtools)
+  library(sechm)
   library(edgeR)
   library(ggplot2)
+  library(grid)
+  library(cowplot)
 })
+theme_set(theme_classic())
 ```
 
-
+# Overview 
 
 ```{r, fig.width=8, fig.height=6}
 se <- readRDS("salmon/geneLevel.SE.rds")
@@ -35,40 +43,251 @@ se <- svacor(se, ~condition, n.sv=2)
 se$condition <- relevel(factor(se$condition), "18h untreated")
 se$condition2 <- se$condition
 levels(se$condition2) <- gsub("^18h DMSO$|18h untreated","control",levels(se$condition2))
+se$isInhibited <- grepl("Cort113|KH-103|MIF", se$condition2)
+se$isDEX <- grepl("DEX", se$condition2)
+se$condType <- factor(paste0(as.integer(se$isDEX),as.integer(se$isInhibited)))
+levels(se$condType) <- c("control", "inhibited", "DEX", "DEX+inhibited")
+metadata(se)$default_view <- list( assay="scaledLFC", groupvar="condType", colvar="condition",
+                                   top_annotation=c("condType") )
+
 mm <- model.matrix(~SV1+SV2+condition2, data=as.data.frame(colData(se)))
 dds <- estimateDisp(dds,mm)
-conds <- grep("condition",colnames(mm),value=TRUE)
-names(conds) <- gsub("condition","",conds)
+conds <- grep("condition2",colnames(mm),value=TRUE)
+names(conds) <- gsub("condition2","",conds)
 fit <- glmFit(dds,mm)
 res <- lapply(conds, FUN=function(x){
-  as.data.frame(topTags(glmLRT(fit,x), Inf))
+  y <- as.data.frame(topTags(glmLRT(fit,x), Inf))
+  attr(y, "description") <- paste0(gsub("condition2","",x), "  vs.  DMSO & untreated")
+  y
 })
 for(f in names(res)){
   rowData(se)[[paste0("DEA.",f)]] <- 
-    plgINS::dround(res[[f]][row.names(se),c(1,2,4,5)], 2, TRUE)
+    plgINS2::dround(res[[f]][row.names(se),c(1,2,4,5)], 2, TRUE)
 }
-topDegs <- unique(unlist(lapply(res, FUN=function(x) head(row.names(x),15))))
+topDegs <- unique(unlist(lapply(res, FUN=function(x){
+  head(row.names(x)[x$FDR<0.01],15)
+})))
 levels(se$condition) <- gsub("> ",">\n", levels(se$condition))
 se$condition <- factor(se$condition, 
                        unique(c("18h untreated","18h DMSO",levels(se$condition))))
 se <- log2FC(se, "logcpm", se$condition2=="control")
 ```
 
-
 ```{r, fig.width=8, fig.height=8}
-sechm(se, topDegs, assay="logcpm", do.scale=TRUE, gaps_at="condition", 
-      anno_columns="batch", row_title="Union of top DEGs", show_rownames=TRUE,
+sechm(se, topDegs, assay="scaledLFC", gaps_at="condition", breaks=TRUE,
+      top_annotation="batch", row_title="Union of top DEGs", show_rownames=TRUE,
       row_names_gp=gpar(fontsize=9), column_title_gp=gpar(fontsize=10),
       column_title_rot=90)
 ```
 
-```{r, fig.width=8, fig.height=8}
-sechm(se, topDegs, assay="log2FC", gaps_at="condition", 
-      anno_columns="batch", row_title="Union of top DEGs", show_rownames=TRUE,
-      row_names_gp=gpar(fontsize=9), column_title_gp=gpar(fontsize=10),
-      column_title_rot=90)
+```{r, fig.width=8, fig.height=6}
+rowData(se)$logFC.2hDEX <- rowData(se)$logFC.18hDEX <- NA 
+rowData(se)$propInhib.prior <- rowData(se)$propInhib.after <- NA 
+
+tmp <- as.list(rowData(se)[,grep("\\.16h",colnames(rowData(se)))])
+tmp <- tmp[grep("DMSO",names(tmp),invert=TRUE)]
+names(tmp) <- gsub("^DEA\\.","",names(tmp))
+dea <- rowData(se)[["DEA.16h DMSO > 2h DEX+DMSO"]]
+degs <- row.names(dea)[which(dea$FDR<0.01 & abs(dea$logFC)>log2(1.2))]
+d <- dplyr::bind_rows(lapply(tmp, FUN=function(x) data.frame(gene=degs, logFC=x[degs,"logFC"])), .id="condition")
+o <- sort(rank(setNames(dea[degs,"logFC"], degs)))
+d$order <- o[d$gene]
+d$DEX.logFC <- dea[d$gene,"logFC"]
+d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
+d$propInhib[d$propInhib>1] <- 1
+ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
+row.names(ag) <- ag$gene
+rowData(se)[row.names(ag), "logFC.2hDEX"] <- ag$DEX.logFC
+rowData(se)[row.names(ag), "propInhib.before"] <- ag$propInhib
+p1 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
+  geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
+  xlab("logFC rank in 16h DMSO > 2h DEX+DMSO") + 
+  scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
+
+tmp <- as.list(rowData(se)[,grep("^DEA\\.2h",colnames(rowData(se)))])
+tmp <- tmp[grep("DMSO",names(tmp),invert=TRUE)]
+names(tmp) <- gsub("^DEA\\.","",names(tmp))
+dea <- rowData(se)[["DEA.2h DEX > 16h DEX+DMSO"]]
+degs <- row.names(dea)[which(dea$FDR<0.01 & abs(dea$logFC)>log2(1.2))]
+d <- dplyr::bind_rows(lapply(tmp, FUN=function(x) data.frame(gene=degs, logFC=x[degs,"logFC"])), .id="condition")
+o <- sort(rank(setNames(dea[degs,"logFC"], degs)))
+d$order <- o[d$gene]
+d$DEX.logFC <- dea[d$gene,"logFC"]
+d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
+d$propInhib[d$propInhib>1] <- 1
+ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
+row.names(ag) <- ag$gene
+rowData(se)[row.names(ag), "logFC.18hDEX"] <- ag$DEX.logFC
+rowData(se)[row.names(ag), "propInhib.after"] <- ag$propInhib
+p2 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
+  geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
+  xlab("logFC rank in 2h DEX > 16h DEX+DMSO") + 
+  scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
+
+plot_grid(p1, p2, nrow=2, labels="AUTO")
 ```
+(The red line indicates the foldchanges upon DEX (2h in A, 18h in B), while the dots indicate the foldhanges with the respective inhibitor)
+KH-103 is *more efficient when administered before the activation*, but *less efficient when administered after*, where mifrepristone seems best.
+
+
+
+# Side effects of the inhibitors
+
+## Genes triggered by all inhibitors (no DEX)
+
 ```{r}
+w <- se$condition2 %in% c("control","18h Cort113","18h KH-103","18h MIF")
+dds2 <- dds[,w]
+mm <- model.matrix(~se$isInhibited[w])
+fit <- glmFit(dds2,mm)
+res <- as.data.frame(topTags(glmLRT(fit),Inf))
+attr(res, "description") <- "18h inhibitor (any)  vs  DMSO & untreated"
+rowData(se)$DEA.inhibition <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
 
+sechm(se[,w], head(row.names(res)[res$FDR<0.05],200), assay="scaledLFC", gaps_at="condition", 
+      breaks=TRUE, top_annotation="batch", row_title="Triggered by inhibitors (top 200)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+```
+
+## Genes specifically altered by KH-103
+
+```{r}
+isKh <- se$condition[w]=="18h KH-103"
+mm <- model.matrix(~isKh)
+fit <- glmFit(estimateDisp(dds2,mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit, "isKhTRUE"),Inf))
+attr(res, "description") <- "Altered by (18h) KH-103 but not by other inhibitors"
+rowData(se)$DEA.KHonly <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,w], row.names(res)[res$FDR<0.05], assay="log2FC", gaps_at="condition", 
+      breaks=1, top_annotation="batch", row_title="Altered by KH-103 only", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+```
+
+
+## Genes triggered by other inhibitors and not (or less) KH-103
+
+```{r}
+mm <- model.matrix(~se$isInhibited[w]+isKh)
+fit <- glmFit(estimateDisp(dds2,mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit, contrast=c(0,1,-1)),Inf))
+attr(res, "description") <- "Altered by (18h) Cort113/MIF, but not (or significantly less) by (18h) KH-103"
+rowData(se)$DEA.otherInhibs <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,w], head(row.names(res)[res$FDR<0.05],200), assay="log2FC", gaps_at="condition", 
+      breaks=TRUE, top_annotation="batch", row_title="Triggered by other inhibitors (top 200)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+```
+
+This shows that, at concentrations where it is more potent, KH-103 triggers fewer side effects than the other inhibitors.
+
+Importantly, many of these genes are actually genes that are upregulated by DEX, suggesting that the inhibitors trigger GCR activation:
+
+```{r}
+sechm(se, head(row.names(res)[res$FDR<0.05],200), assay="log2FC", gaps_at="condition", 
+      breaks=TRUE, top_annotation="batch", row_title="Triggered by other inhibitors (top 200)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+
+```
+To get a better idea of this, we can compare the foldchanges upon inhibitor (Cort113/MIF, without DEX) to the foldchanges upon DEX of the union of genes activated by DEX of by the two inhibitors:
+
+```{r}
+dex <- rowData(se)[["DEA.16h DMSO > 2h DEX+DMSO"]]
+m <- merge(dex, res, by="row.names", suffix=c(".DEX",".inhib"))
+m <- m[which(m$FDR.DEX<0.01 | m$FDR.inhib < 0.01),]
+m$logFC.DEX[which(m$logFC.DEX>5)] <- 5
+m$logFC.inhib[which(m$logFC.inhib< -5)] <- -5
+m$logFC.inhib[which(m$logFC.inhib< -5)] <- -5
+m$logFC.inhib[which(m$logFC.inhib>5)] <- 5
+ggplot(m, aes(logFC.DEX, logFC.inhib, colour=sqrt(sqrt(-log10(FDR.inhib))))) + 
+  geom_vline(xintercept=0, linetype="dashed", colour="grey") + 
+  geom_hline(yintercept=0, linetype="dashed", colour="grey") + 
+  geom_abline(slope=1) + geom_point() +
+  scale_colour_viridis_c(breaks=sqrt(c(0,1.14,3,6)), labels=c(1,"0.05","1e-9","1e-36")) +
+  labs(colour="FDR upon\ninhibition", x="logFC upon DEX (18h)", y="logFC upon inhibition (by Cort113/MIF)")
+```
+We see that the genes most strongly activated by the inhibitors are also activated by DEX; however, the inhibitors also alters a much larger number of other genes which are not altered by DEX. Similarly, most DEX-sensitive genes are not altered upon administration of the inhibitors.
+
+One possibility, since we saw that Cort113/MIF can block GCR signaling even when administered after DEX, is that they are inhibiting baseline GCR activity. We'll have to use the chromatin data to investigate whether this is the case.
+
+# Inhibited genes
+
+## DEX-triggered genes that are inhibited (prior)
+
+```{r}
+wPrior <- which(se$condition2 %in% c("control", "16h Cort113 > 2h DEX+Cort113", "16h DMSO > 2h DEX+DMSO", 
+"16h KH-103 > 2h DEX+KH-103", "16h MIF  > 2h DEX+MIF"))
+mm <- model.matrix(~droplevels(se$condition2[wPrior]))
+fit <- glmFit(estimateDisp(dds[,wPrior],mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit, contrast=c(0,0,1,0,0)), Inf))
+attr(res, "description") <- "Significantly-inhibited DEX-responsive genes by any all inhibitors, when administered before DEX"
+rowData(se)$DEA.inhibited.prior <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,wPrior], head(row.names(res)[res$FDR<0.05],200), assay="scaledLFC", gaps_at="condition", 
+      breaks=0.995, top_annotation="batch", row_title="Top 200 inhibited (prior)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+
+```
+
+### Significantly more inhibited by KH-103 than by other inhibitors
+
+```{r}
+tmp <- grepl("KH-103|control",se$condition2)[wPrior]
+mm <- model.matrix(~tmp)
+fit <- glmFit(estimateDisp(dds[,wPrior],mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit), Inf))
+attr(res, "description") <- "DEX-responsive genes significantly more inhibited by KH-103 than by other inhibitors, when administed before DEX"
+rowData(se)[["DEA.inhibited by others.prior"]] <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,wPrior], head(row.names(res)[res$FDR<0.05],200), assay="scaledLFC", gaps_at="condition", 
+      breaks=0.995, top_annotation="batch", row_title="More inhibited by KH-103 (prior)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+```
+
+### Significantly less inhibited by KH-103 than by other inhibitors
+
+```{r}
+tmp <- grepl("KH-103|DEX\\+DMSO",se$condition2)[wPrior]
+mm <- model.matrix(~tmp)
+fit <- glmFit(estimateDisp(dds[,wPrior],mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit), Inf))
+attr(res, "description") <- "DEX-responsive genes significantly less inhibited by KH-103 than by other inhibitors, when administed before DEX"
+rowData(se)[["DEA.inhibited by others.prior"]] <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,wPrior], head(row.names(res)[res$FDR<0.05],200), assay="scaledLFC", gaps_at="condition", 
+      breaks=0.995, top_annotation="batch", row_title="Less inhibited by KH-103 (prior)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+
+```
+
+
+## DEX-triggered genes that are inhibited (after)
+
+```{r}
+wAfter <- which(se$condition2 %in% c("control", "2h DEX > 16h DEX+Cort113", "2h DEX > 16h DEX+DMSO", 
+"2h DEX > 16h DEX+KH-103", "2h DEX > 16h DEX+MIF"))
+mm <- model.matrix(~droplevels(se$condition2[wAfter]))
+fit <- glmFit(estimateDisp(dds[,wAfter],mm),mm)
+res <- as.data.frame(topTags(glmLRT(fit, contrast=c(0,0,1,0,0)), Inf))
+attr(res, "description") <- "Significantly-inhibited DEX-responsive genes by any all inhibitors, when administered after DEX"
+rowData(se)$DEA.inhibited.after <- plgINS2::dround(res[row.names(se),c(1,4,5)], 2, TRUE)
+
+sechm(se[,wAfter], head(row.names(res)[res$FDR<0.05],200), assay="scaledLFC", gaps_at="condition", 
+      breaks=0.999, top_annotation="batch", row_title="Top 200 Inhibited (after)", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90)
+
+```
+
+# Saving the object
+
+```{r}
+saveRDS(se, "SE.processed.rds")
+```
+
+
+# Session info
+
+```{r}
+sessionInfo()
 ```
 
