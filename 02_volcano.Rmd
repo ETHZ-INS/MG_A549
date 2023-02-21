@@ -1,0 +1,77 @@
+---
+title: "MG A549 experiments - volcano plots"
+author: "Pierre-Luc Germain"
+date: "3/1/2022"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(sechm)
+  library(ggplot2)
+  library(cowplot)
+})
+theme_set(theme_classic())
+se <- readRDS("SE.processed.rds")
+```
+
+```{r}
+deas <- getDEA(se)
+d2h <- deas$`16h DMSO > 2h DEX+DMSO`
+d18h <- deas$`2h DEX > 16h DEX+DMSO`
+```
+
+```{r}
+volcano <- function(dea, th.logFC=log2(1.2), th.FDR=0.05, hl=NULL){
+  dea$significant <- as.integer(dea$FDR <= th.FDR & abs(dea$logFC) >= th.logFC) * sign(dea$logFC)
+  sxlim <- range(dea$logFC[which(dea$significant!=0)])
+  dea$significant <- factor(dea$significant, -1:1, c("downregulated","n.s.","upregulated"))
+  cols <- c(downregulated="darkred", upregulated="darkblue", "n.s."="lightgrey")
+  p <- ggplot(dea, aes(logFC, -log10(FDR))) + geom_point(aes(colour=significant)) + 
+    coord_cartesian(xlim=sxlim) + scale_colour_manual(values=cols)
+  if(is.null(hl) || (length(hl)==1 && is.integer(hl))){
+    if(is.null(hl)) hl <- 10
+    hl <- head(row.names(dea)[dea$significant!="n.s."],hl)
+  }
+  if(all(is.na(hl))) return(p)
+  dea <- dea[hl,]
+  dea$gene <- row.names(dea)
+  p + ggrepel::geom_text_repel(data=dea, aes(label=gene), min.segment.length=0, size=3)
+}
+```
+
+```{r, fig.width=9, fig.height=4}
+p1 <- volcano(d2h, th.FDR=0.01) + ggtitle("16h DMSO > 2h DEX+DMSO vs 18h DMSO")
+p2 <- volcano(d18h, th.FDR=0.01) + ggtitle("2h DEX > 16h DEX+DMSO vs 18h DMSO")
+leg <- cowplot::get_legend(p1)
+p <- cowplot::plot_grid(p1 + theme(legend.position="none"),
+                       p2 + theme(legend.position="none"),
+                       leg, rel_widths=c(4,4,1.5), nrow=1, labels=c("A","B",NA), scale=0.95)
+pdf("volcano.pdf", width=9, height=4, pointsize = 10)
+p
+dev.off()
+```
+
+```{r, fig.width=9, fig.height=8}
+pl <- lapply(c("18h Cort113", "18h KH-103","18h MIF"), FUN=function(x){
+  volcano(deas[[x]], th.FDR=0.01) + ggtitle(paste0(x, " vs 18h DMSO")) + theme(legend.position="none")
+})
+pp <- plot_grid(p, nrow = 2,
+          plot_grid(plotlist=pl, nrow=1, labels=c("C","D","E"), scale=0.95))
+pdf("volcano2.pdf", width=10, height=8, pointsize = 10)
+pp
+dev.off()
+```
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
