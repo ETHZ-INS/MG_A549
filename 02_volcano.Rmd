@@ -15,6 +15,7 @@ suppressPackageStartupMessages({
   library(sechm)
   library(ggplot2)
   library(cowplot)
+  library(ComplexHeatmap)
 })
 theme_set(theme_classic())
 se <- readRDS("SE.processed.rds")
@@ -66,6 +67,17 @@ pp <- plot_grid(p, nrow = 2,
 pdf("volcano2.pdf", width=10, height=8, pointsize = 10)
 pp
 dev.off()
+```
+
+
+## Clustering
+
+```{r}
+adegs <- unique(unlist(lapply(getDEA(se), FUN=function(x) row.names(x)[x$FDR<0.05])))
+se2 <- scuttle::sumCountsAcrossCells(assays(se)$logcpm[intersect(adegs,row.names(se)),], se$condition, average=TRUE)
+se2 <- se2[,grep("^2h",colnames(se2),invert=TRUE)]
+h <- hclust(dist(t(assay(se2))))
+cm <- cor(assay(se2))
 ```
 
 
