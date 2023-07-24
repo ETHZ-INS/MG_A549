@@ -81,6 +81,7 @@ sechm(se, topDegs, assay="scaledLFC", gaps_at="condition", breaks=TRUE,
 ```
 
 ```{r, fig.width=8, fig.height=6}
+se <- readRDS("SE.processed.rds")
 rowData(se)$logFC.2hDEX <- rowData(se)$logFC.18hDEX <- NA 
 rowData(se)$propInhib.prior <- rowData(se)$propInhib.after <- NA 
 
@@ -97,11 +98,13 @@ d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
 d$propInhib[d$propInhib>1] <- 1
 ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
 row.names(ag) <- ag$gene
+ag <- ag[intersect(row.names(ag),row.names(se)),]
 rowData(se)[row.names(ag), "logFC.2hDEX"] <- ag$DEX.logFC
 rowData(se)[row.names(ag), "propInhib.before"] <- ag$propInhib
+d$condition <- factor(d$condition, c("16h MIF  > 2h DEX+MIF", "16h Cort113 > 2h DEX+Cort113", "16h KH-103 > 2h DEX+KH-103"))
 p1 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
   geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
-  xlab("logFC rank in 16h DMSO > 2h DEX+DMSO") + 
+  xlab("logFC rank in 16h DMSO > 2h DEX+DMSO") + geom_smooth() +
   scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
 
 tmp <- as.list(rowData(se)[,grep("^DEA\\.2h",colnames(rowData(se)))])
@@ -117,12 +120,18 @@ d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
 d$propInhib[d$propInhib>1] <- 1
 ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
 row.names(ag) <- ag$gene
+ag <- ag[intersect(row.names(ag),row.names(se)),]
 rowData(se)[row.names(ag), "logFC.18hDEX"] <- ag$DEX.logFC
 rowData(se)[row.names(ag), "propInhib.after"] <- ag$propInhib
+d$condition <- factor(d$condition, c("2h DEX > 16h DEX+MIF", "2h DEX > 16h DEX+Cort113", "2h DEX > 16h DEX+KH-103"))
 p2 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
   geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
-  xlab("logFC rank in 2h DEX > 16h DEX+DMSO") + 
+  xlab("logFC rank in 2h DEX > 16h DEX+DMSO") + geom_smooth() +
   scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
+
+pdf("inhibition_curves.pdf", width=8, height=6)
+plot_grid(p1, p2, nrow=2, labels="AUTO")
+dev.off()
 
 plot_grid(p1, p2, nrow=2, labels="AUTO")
 ```

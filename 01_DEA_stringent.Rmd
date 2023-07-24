@@ -1,0 +1,163 @@
+---
+title: "MG A549 experiments - DEA and exploration"
+author: "Pierre-Luc Germain"
+date: "2023/07/17"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(SEtools)
+  library(sechm)
+  library(edgeR)
+  library(ggplot2)
+  library(grid)
+  library(cowplot)
+})
+theme_set(theme_classic())
+lfc.th <- 1
+```
+
+# Overview 
+
+```{r, fig.width=8, fig.height=6}
+se <- readRDS("salmon/geneLevel.SE.rds")
+dds <- calcNormFactors(DGEList(assay(se)))
+assays(se)$logcpm <- log1p(cpm(dds))
+dds <- dds[filterByExpr(dds,model.matrix(~se$condition),min.count=20),]
+se <- se[row.names(dds),]
+se <- svacor(se, ~condition, n.sv=2)
+se$condition <- relevel(factor(se$condition), "18h untreated")
+se$condition2 <- se$condition
+levels(se$condition2) <- gsub("^18h DMSO$|18h untreated","control",levels(se$condition2))
+se$isInhibited <- grepl("Cort113|KH-103|MIF", se$condition2)
+se$isDEX <- grepl("DEX", se$condition2)
+se$condType <- factor(paste0(as.integer(se$isDEX),as.integer(se$isInhibited)))
+levels(se$condType) <- c("control", "inhibited", "DEX", "DEX+inhibited")
+metadata(se)$default_view <- list( assay="scaledLFC", groupvar="condType", colvar="condition",
+                                   top_annotation=c("condType") )
+
+mm <- model.matrix(~SV1+SV2+condition2, data=as.data.frame(colData(se)))
+dds <- estimateDisp(dds,mm)
+conds <- grep("condition2",colnames(mm),value=TRUE)
+names(conds) <- gsub("condition2","",conds)
+fit <- glmFit(dds,mm)
+res <- lapply(conds, FUN=function(x){
+  y <- as.data.frame(topTags(glmLRT(fit,x), Inf))[,c(1,4,5)]
+  attr(y, "description") <- paste0(gsub("condition2","",x), "  vs.  DMSO & untreated")
+  y
+})
+for(f in names(res)){
+  rowData(se)[[paste0("DEA.",f)]] <-res[[f]][row.names(se),]
+}
+topDegs <- unique(unlist(lapply(res, FUN=function(x){
+  head(row.names(x)[which(x$FDR<0.01 & abs(x$logFC)>lfc.th)],15)
+})))
+levels(se$condition) <- gsub("> ",">\n", levels(se$condition))
+se$condition <- factor(se$condition, 
+                       unique(c("18h untreated","18h DMSO",levels(se$condition))))
+se <- log2FC(se, "logcpm", se$condition2=="control")
+```
+
+```{r, fig.width=8, fig.height=8}
+sechm(se, topDegs, assay="scaledLFC", gaps_at="condition", breaks=TRUE,
+      top_annotation="batch", row_title="Union of top DEGs", show_rownames=TRUE,
+      row_names_gp=gpar(fontsize=9), column_title_gp=gpar(fontsize=10),
+      column_title_rot=90)
+```
+
+```{r, fig.width=8, fig.height=6}
+rowData(se)$logFC.2hDEX <- rowData(se)$logFC.18hDEX <- NA 
+rowData(se)$propInhib.prior <- rowData(se)$propInhib.after <- NA 
+
+tmp <- as.list(rowData(se)[,grep("\\.16h",colnames(rowData(se)))])
+tmp <- tmp[grep("DMSO",names(tmp),invert=TRUE)]
+names(tmp) <- gsub("^DEA\\.","",names(tmp))
+dea <- rowData(se)[["DEA.16h DMSO > 2h DEX+DMSO"]]
+degs <- row.names(dea)[which(dea$FDR<0.05 & abs(dea$logFC)>lfc.th)]
+d <- dplyr::bind_rows(lapply(tmp, FUN=function(x) data.frame(gene=degs, logFC=x[degs,"logFC"])), .id="condition")
+o <- sort(rank(setNames(dea[degs,"logFC"], degs)))
+d$order <- o[d$gene]
+d$DEX.logFC <- dea[d$gene,"logFC"]
+d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
+d$propInhib[d$propInhib>1] <- 1
+ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
+row.names(ag) <- ag$gene
+ag <- ag[intersect(row.names(ag),row.names(se)),]
+rowData(se)[row.names(ag), "logFC.2hDEX"] <- ag$DEX.logFC
+rowData(se)[row.names(ag), "propInhib.before"] <- ag$propInhib
+d$condition <- factor(d$condition, c("16h MIF  > 2h DEX+MIF", "16h Cort113 > 2h DEX+Cort113", "16h KH-103 > 2h DEX+KH-103"))
+p1 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
+  geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
+  xlab("logFC rank in 16h DMSO > 2h DEX+DMSO") + geom_smooth() +
+  scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
+
+tmp <- as.list(rowData(se)[,grep("^DEA\\.2h",colnames(rowData(se)))])
+tmp <- tmp[grep("DMSO",names(tmp),invert=TRUE)]
+names(tmp) <- gsub("^DEA\\.","",names(tmp))
+dea <- rowData(se)[["DEA.2h DEX > 16h DEX+DMSO"]]
+degs <- row.names(dea)[which(dea$FDR<0.05 & abs(dea$logFC)>lfc.th)]
+d <- dplyr::bind_rows(lapply(tmp, FUN=function(x) data.frame(gene=degs, logFC=x[degs,"logFC"])), .id="condition")
+o <- sort(rank(setNames(dea[degs,"logFC"], degs)))
+d$order <- o[d$gene]
+d$DEX.logFC <- dea[d$gene,"logFC"]
+d$propInhib <- -(1-2^abs(d$logFC-d$DEX.logFC))
+d$propInhib[d$propInhib>1] <- 1
+ag <- aggregate(d[,c("DEX.logFC","propInhib")], by=d[,"gene",drop=FALSE], FUN=median)
+row.names(ag) <- ag$gene
+ag <- ag[intersect(row.names(ag),row.names(se)),]
+rowData(se)[row.names(ag), "logFC.18hDEX"] <- ag$DEX.logFC
+rowData(se)[row.names(ag), "propInhib.after"] <- ag$propInhib
+d$condition <- factor(d$condition, c("2h DEX > 16h DEX+MIF", "2h DEX > 16h DEX+Cort113", "2h DEX > 16h DEX+KH-103"))
+p2 <- ggplot(d, aes(order, logFC)) + geom_line(aes(order, DEX.logFC), lwd=1.5, colour="red") + 
+  geom_hline(yintercept=0) + geom_point(alpha=0.2, size=0.5) + facet_wrap(~condition) + ylim(-3,3) +
+  xlab("logFC rank in 2h DEX > 16h DEX+DMSO") + geom_smooth() +
+  scale_x_continuous(breaks=c(0,max(d$order)), labels=c("down", "up"))
+plot_grid(p1, p2, nrow=2, labels="AUTO")
+```
+
+
+```{r, fig.width=8, fig.height=6}
+pdf("inhibition_curves.pdf", width=8, height=6)
+plot_grid(p1, p2, nrow=2, labels="AUTO")
+dev.off()
+```
+(The red line indicates the foldchanges upon DEX (2h in A, 18h in B), while the dots indicate the foldhanges with the respective inhibitor)
+KH-103 is *more efficient when administered before the activation*, but *less efficient when administered after*, where mifrepristone seems best.
+
+
+
+# Side effects of the inhibitors
+
+## Genes triggered by any blocker
+
+```{r, fig.width=5, fig.height=3.5}
+w <- se$condition2 %in% c("control","18h Cort113","18h KH-103","18h MIF")
+dds2 <- dds[,w]
+mm <- model.matrix(~droplevels(se$condition2[w]))
+fit <- glmFit(dds2,mm)
+res <- lapply(colnames(mm)[-1], FUN=function(x){
+  as.data.frame(topTags(glmLRT(fit, x),Inf))[,c(1,4,5)]
+})
+degs <- getDEGs(res,lfc.th=lfc.th, fdr.th=0.05,merge=TRUE)
+
+h <- sechm(se[,w], degs, assay="scaledLFC", gaps_at="condition", 
+      breaks=0.999, top_annotation="batch", row_title="Triggered by any blocker", 
+      column_title_gp=gpar(fontsize=10), column_title_rot=90, row_names_gp=gpar(fontsize=8))
+draw(h,merge=TRUE)
+```
+
+
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

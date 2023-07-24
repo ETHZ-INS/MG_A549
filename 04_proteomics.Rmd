@@ -1,0 +1,61 @@
+---
+title: "Proteomics"
+output: html_document
+date: "2023-07-19"
+---
+
+```{r}
+library(ggplot2)
+```
+
+
+```{r}
+volcano <- function(dea, th.logFC=log2(1.5), th.FDR=0.05, hl=NULL, sxlim=NULL){
+  dea$logFC <- dea$diff
+  dea$significant <- as.integer(dea$FDR <= th.FDR & abs(dea$logFC) >= th.logFC) * sign(dea$logFC)
+  if(isTRUE(sxlim)) sxlim <- range(dea$logFC[which(dea$significant!=0)])
+  dea$significant <- factor(dea$significant, -1:1, c("downregulated","n.s.","upregulated"))
+  cols <- c(downregulated="darkred", upregulated="darkblue", "n.s."="grey")
+  p <- ggplot(dea, aes(logFC, -log10(FDR))) + 
+    geom_hline(yintercept=-log10(th.FDR), linetype="dashed") +
+    geom_vline(xintercept=c(-th.logFC,th.logFC), linetype="dashed") +
+    ggrastr::geom_point_rast(aes(colour=significant, size=nrPeptides), alpha=0.5) + 
+    scale_colour_manual(values=cols)# + scale_alpha_manual(values=c("TRUE"=0.8, "FALSE"=0.4))
+  if(!is.null(sxlim)) p <- p + coord_cartesian(xlim=sxlim)
+  if(is.null(hl) || (length(hl)==1 && is.integer(hl))){
+    if(is.null(hl)) hl <- 10
+    hl <- head(row.names(dea)[dea$significant!="n.s."],hl)
+  }
+  if(all(is.na(hl))) return(p)
+  dea <- dea[hl,]
+  p + ggrepel::geom_text_repel(data=dea, aes(label=gene), min.segment.length=0, size=3)
+}
+
+```
+
+```{r, fig.width=6, fig.height=4}
+e <- read.delim("proteomic_DEA.csv",header=TRUE, row.names = 1)
+e$gene <- gsub(".+\\||_HUMAN","",i$fasta.id)
+e <- e[order(e$p.value),]
+
+p1 <- volcano(e) + theme_classic() + 
+  scale_size_continuous(trans="sqrt", breaks = c(1,2,5,10,20), range=c(0.3,9)) +
+  labs(size="Number of\npeptides", colour="Significant")
+
+p2 <- volcano(e, hl=1:8) + theme_classic() + 
+  scale_size_continuous(trans="sqrt", breaks = c(1,2,5,10,20), range=c(0.3,9)) +
+  labs(size="Number of\npeptides", colour="Significant")
+p1
+
+pdf("proteomics_volcano_1.pdf", width=6, height=4)
+p1
+dev.off()
+
+pdf("proteomics_volcano_2.pdf", width=6, height=4)
+p2
+dev.off()
+
+
+ggplot(e, aes(avgAbd, diff, colour=-log10(FDR), alpha=log10(nrPeptides), size=log10(nrPeptides))) + geom_point() + scale_size_continuous(range=c(0.1,3)) + theme_classic()
+```
+

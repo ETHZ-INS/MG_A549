@@ -1,0 +1,166 @@
+---
+title: "MG A549 experiments - MA plots"
+author: "Pierre-Luc Germain"
+date: "2023/07/17"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(sechm)
+  library(ggplot2)
+  library(ggrastr)
+  library(cowplot)
+  library(ComplexHeatmap)
+  library(ggvenn)
+  library(UpSetR)
+})
+theme_set(theme_classic())
+se <- readRDS("SE.processed.rds")
+```
+
+```{r}
+deas <- getDEA(se, homogenize = FALSE)
+d2h <- deas$`16h DMSO > 2h DEX+DMSO`
+d18h <- deas$`2h DEX > 16h DEX+DMSO`
+```
+
+```{r}
+masig <- function(dea, hl=NULL, ylim=NULL, FDR.th=0.01, lfc.th=log2(1.2)){
+  dea$logCPM <- rowMeans(assays(se)$logcpm)
+  if(is.null(ylim)) ylim <- range(dea$logFC[which(dea$logCPM>=1)],na.rm=TRUE)
+  print(ylim)
+  p <- ggplot(dea, aes(logCPM, logFC)) + geom_point_rast(aes(colour=-log10(FDR))) +
+    scale_color_viridis_c(trans="sqrt", option="B", direction=-1) + coord_cartesian(ylim=ylim)
+  if(is.null(hl) || (length(hl)==1 && is.integer(hl))){
+    if(is.null(hl)) hl <- 10
+    dea <- dea[which(dea$FDR<FDR.th & abs(dea$logFC)>=lfc.th),]
+    hl <- head(row.names(dea)[order(dea$FDR)],hl)
+  }
+  if(all(is.na(hl))) return(p)
+  dea <- dea[hl,]
+  dea$gene <- row.names(dea)
+  p + ggrepel::geom_text_repel(data=dea, aes(label=gene), min.segment.length=0, size=3,
+                               nudge_y=0.05*sign(dea$logFC)*abs(diff(ylim)))
+}
+```
+
+```{r, fig.width=9, fig.height=4}
+p1 <- masig(d2h) + ggtitle("16h DMSO > 2h DEX+DMSO vs 18h DMSO")
+p2 <- masig(d18h) + ggtitle("2h DEX > 16h DEX+DMSO vs 18h DMSO")
+leg <- cowplot::get_legend(p1)
+p <- cowplot::plot_grid(p1 + theme(legend.position="none"),
+                       p2 + theme(legend.position="none"),
+                       leg, rel_widths=c(4,4,1.5), nrow=1, labels=c("A","B",NA), scale=0.95)
+pdf("maPlots.pdf", width=9, height=4, pointsize = 10)
+p
+dev.off()
+```
+
+```{r, fig.width=9, fig.height=8}
+pl <- lapply(c("18h Cort113", "18h KH-103","18h MIF"), FUN=function(x){
+  masig(deas[[x]], ylim=c(-3.8,4.5)) + ggtitle(paste0(x, " vs 18h DMSO")) + theme(legend.position="bottom")
+})
+pp <- plot_grid(p, nrow = 2,
+          plot_grid(plotlist=pl, nrow=1, labels=c("C","D","E"), scale=0.95))
+pdf("maPlots2.pdf", width=10, height=8, pointsize = 10)
+pp
+dev.off()
+```
+
+# Venn Diagrams
+
+## Side effects
+
+```{r, fig.width=10, fig.height=6}
+degs <- getDEGs(deas[c(grep("18h",names(deas), value=TRUE), "2h DEX > 16h DEX+DMSO")], lfc.th=log2(1.2), merge=FALSE)
+names(degs)[length(degs)] <- "18h DEX"
+p1 <- ggvenn(degs, set_name_size = 4) + ggtitle("Side effects of the inhibitors")
+upset(fromList(degs))
+```
+
+## Inhibition
+
+```{r, fig.width=10, fig.height=6}
+degs <- getDEGs(deas[c(grep("^2h",names(deas), value=TRUE))], lfc.th=log2(1.2), merge=FALSE)
+names(degs) <- gsub("16h DEX+","",gsub("^2h DEX > ","DEX",names(degs)))
+degs <- c(degs[-2],degs[2])
+p2 <- ggvenn(degs, set_name_size = 4) + ggtitle("Inhibition after DEX")
+
+degs <- getDEGs(deas[c(grep("^16h",names(deas), value=TRUE))], lfc.th=log2(1.2), merge=FALSE)
+names(degs) <- gsub("16h ","",gsub(" > 2h DEX.+","+DEX",names(degs)))
+degs <- c(degs[-2],degs[2])
+p3 <- ggvenn(degs, set_name_size = 4) + ggtitle("Inhibition prior DEX")
+
+```
+
+```{r}
+pdf("venn.pdf", width=10, height=18)
+plot_grid(p1,p2,p3, nrow=3)
+dev.off()
+```
+```{r}
+
+```
+
+## Icaros
+
+```{r, fig.height=4, fig.width=10}
+# known targets in b cells
+ic <- c("CCND2", "CDKN1A", "CDK6", "MYC", "LIG4", "FOXO1", "CD79B", "BLNK", "SYKB", "VPREB1")
+se$condition
+sechm(se, ic, gaps_at="condition", column_title_rot=90, row_title="Ikaros targets")
+sechm(se, grep("^IKZF",row.names(se)), gaps_at="condition", column_title_rot=90)
+```
+
+
+```{r, fig.height=7, fig.width=7}
+ggplot(sechm::meltSE(se[,grep("^16h|^18h", se$condition)], intersect(ic,row.names(se)), rowDat.columns = NA), aes(condition, log2FC)) + geom_hline(yintercept=0, linetype="dashed") + geom_boxplot() + facet_wrap(~feature, scales = "free_x") + coord_flip()
+```
+
+
+```{r}
+ik <- readRDS("IKZF1.rds")
+ik <- ik[ik$score>8]
+library(AnnotationHub)
+ah <- AnnotationHub(localHub=TRUE)
+ensdb <- ah[["AH109336"]]
+tx <- transcripts(ensdb, columns=c("tx_biotype", "gene_name", "tx_support_level"))
+tx <- tx[which(tx$tx_biotype=="protein_coding" & tx$tx_support_level==1L)]
+proms <- promoters(tx, upstream=1000, downstream=200)
+proms$ikaros <- overlapsAny(proms, ik)
+gsets <- lapply(split(proms$gene_name, proms$ikaros), unique)
+names(gsets) <- c("none","Ikaros")
+gsets$none <- setdiff(gsets$none,gsets$Ikaros)
+gsets <- lapply(gsets, intersect, y=row.names(se))
+degs <- getDEGs(deas[c(grep("18h",names(deas), value=TRUE), "2h DEX > 16h DEX+DMSO")], lfc.th=log2(1.2), merge=FALSE)
+names(degs)[length(degs)] <- "18h DEX"
+degs$Ikaros <- gsets$Ikaros
+ggvenn(degs[-4], set_name_size = 4)
+
+overlap.prob <- function (set1, set2, universe, lower = F){
+    set1 <- unique(as.character(set1))
+    set2 <- unique(as.character(set2))
+    if (class(universe) == "character") {
+        set1 <- intersect(set1, universe)
+        set2 <- intersect(set2, universe)
+        universe <- length(unique(universe))
+    }
+    phyper(max(0, sum(set1 %in% set2)-1), length(set1), universe - length(set1), 
+        length(set2), lower.tail = lower)
+}
+sapply(degs, FUN=function(x) overlap.prob(x, gsets$Ikaros, unlist(gsets)))
+```
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+
